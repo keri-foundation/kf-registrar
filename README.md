@@ -5,15 +5,16 @@ governs V2 ACDC transaction event logs (TELs) and serves them in **bulk** to
 **observers only**.
 
 It is the ACDC counterpart of a witness. Witnesses serve KELs; this process
-serves TELs. Wallets and verifiers must not talk to it. They talk to an observer
-(even a local observer whose only job is talking to the registrar).
+serves TELs. Wallets and verifiers must not talk to it — they talk to an
+observer (anti-correlation). For SEDI, observers are not optional.
 
 ## Dual HTTP
 
 Modeled on [`witness-hk`](https://github.com/keri-foundation/witness-hk):
 
-- **Internal** (default `127.0.0.1:6631`): controller API for the issuer habitat
-  that runs this node. Create/list registries, append `bup`, read one TEL.
+- **Internal / admin** (default `127.0.0.1:6631`): controller API for the
+  registrar/issuer habitat. Create/list registries, append `bup`, read its own
+  TEL data **without** running an observer (unlike witness↔watcher).
 - **External** (default `127.0.0.1:6632`): signed V2 `qry` POST (`r: "tels/bulk"`
   or `"regs"`) authenticated with KRAM and restricted to configured observer
   AIDs. Response is concatenated CESR of accepted `rip`/`bup` events.
