@@ -1,12 +1,12 @@
 # kf-registrar
 
 `kf-registrar` is the KERI Foundation registrar service: a long-running node that
-governs V2 ACDC transaction event logs (TELs) and serves them in **bulk** to
+governs ACDC transaction event logs (TELs) and serves them in **bulk** to
 **observers only**.
 
 It is the ACDC counterpart of a witness. Witnesses serve KELs; this process
-serves TELs. Wallets and verifiers must not talk to it — they talk to an
-observer (anti-correlation). For SEDI, observers are not optional.
+serves TELs. Wallets and verifiers do not communicate directly with this service, they 
+should talk to an observer (kf-observer).
 
 ## Dual HTTP
 
