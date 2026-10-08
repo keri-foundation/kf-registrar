@@ -1,11 +1,4 @@
 # -*- encoding: utf-8 -*-
-"""
-tests.kfregistrar.test_serving module
-
-Trust-boundary tests for the registrar internal controller API and
-observer-only external bulk face.
-"""
-
 import falcon
 from falcon import testing
 
@@ -151,7 +144,7 @@ def test_whitelisted_observer_pulls_contiguous_tel():
 
 
 def test_non_observer_and_wallet_shaped_queries_rejected():
-    """External face rejects non-observer AIDs and wallet-shaped TEL queries."""
+    """External API rejects non-observer AIDs and wallet-shaped TEL queries."""
     with openHby(name="kf-reg-deny", base="test", temp=True, version=Vrsn_2_0) as hby:
         hby.makeHab(name="registrar")
         observer = hby.makeHab(name="observer")
@@ -187,8 +180,8 @@ def test_non_observer_and_wallet_shaped_queries_rejected():
             ctx.rgy.close()
 
 
-def test_health_on_both_faces():
-    """Liveness is available on both faces and leaks no TEL."""
+def test_health_on_both_apis():
+    """Liveness is available on both APIs and leaks no TEL."""
     with openHby(name="kf-reg-health", base="test", temp=True, version=Vrsn_2_0) as hby:
         hby.makeHab(name="registrar")
         ctx = makeContext(hby=hby, alias="registrar", observers=[])
@@ -325,8 +318,8 @@ def test_controller_ingest_pending_until_kel_anchors():
                 ctx.rgy.close()
 
 
-def test_external_face_has_no_ingest_route():
-    """Controller ingest is admin-only; external face has no write path."""
+def test_external_api_has_no_ingest_route():
+    """Controller ingest is admin-only; external API has no write path."""
     with openHby(name="kf-reg-no-ingest", base="test", temp=True, version=Vrsn_2_0) as hby:
         hby.makeHab(name="registrar")
         ctx = makeContext(hby=hby, alias="registrar", observers=[])

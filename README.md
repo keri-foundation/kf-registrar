@@ -1,12 +1,12 @@
 # kf-registrar
 
 `kf-registrar` is the KERI Foundation registrar service: a long-running node that
-governs ACDC transaction event logs (TELs) and serves them in **bulk** to
-**observers only**.
+governs ACDC transaction event logs (TELs) and serves them in bulk to
+observers only (see kf-observer).
 
 It is the ACDC counterpart of a witness. Witnesses serve KELs; this process
 serves TELs. Wallets and verifiers do not communicate directly with this service, they 
-should talk to an observer (kf-observer).
+should talk to an observer.
 
 ## Dual HTTP
 
@@ -14,7 +14,7 @@ Modeled on [`witness-hk`](https://github.com/keri-foundation/witness-hk):
 
 - **Internal / admin** (default `127.0.0.1:6631`): controller API for the
   registrar/issuer habitat. Create/list registries, append `bup`, read its own
-  TEL data **without** running an observer (unlike witness↔watcher). Also
+  TEL data **without** running an observer. Also
   `POST /ingest` for hosting pre-built, KEL-anchored TEL events (e.g.
   presentation registries built in a wallet): JSON
   `{ "kel": "<CESR>", "tel": "<CESR rip/bup>" }` → verify (`regeventing.vet`)

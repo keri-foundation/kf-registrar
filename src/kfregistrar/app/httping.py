@@ -3,7 +3,7 @@
 kfregistrar.app.httping module
 
 Falcon resources for the registrar internal controller API and external
-observer-only bulk TEL face.
+observer-only bulk TEL API.
 """
 
 import json
@@ -98,16 +98,16 @@ class HealthEnd:
 
 
 class QueryRejectEnd:
-    """Wallet-shaped GET /query is never served on the registrar external face."""
+    """Wallet-shaped GET /query is never served on the registrar external API."""
 
     def on_get(self, _req, _rep):
         raise falcon.HTTPForbidden(
-            description="registrar external face does not serve wallet queries"
+            description="registrar external API does not serve wallet queries"
         )
 
     def on_post(self, _req, _rep):
         raise falcon.HTTPForbidden(
-            description="registrar external face does not serve wallet queries"
+            description="registrar external API does not serve wallet queries"
         )
 
 
@@ -241,7 +241,7 @@ class BulkQueryEnd:
 
     def on_get(self, _req, _rep):
         raise falcon.HTTPForbidden(
-            description="registrar external face does not serve wallet queries"
+            description="registrar external API does not serve wallet queries"
         )
 
     def on_post(self, req, rep):
@@ -262,7 +262,7 @@ class BulkQueryEnd:
             raise falcon.HTTPBadRequest(description="unable to parse signed query")
         serder = dom.serder
         if serder.ilk != "qry":
-            raise falcon.HTTPBadRequest(description="external face accepts qry messages only")
+            raise falcon.HTTPBadRequest(description="external API accepts qry messages only")
 
         route = serder.ked.get("r", "")
         qry = serder.ked.get("q") or {}

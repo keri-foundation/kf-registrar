@@ -1,10 +1,6 @@
 # -*- encoding: utf-8 -*-
 """
-kfregistrar.core.ingesting module
-
 Controller ingest of pre-built, KEL-anchored TEL events for hosting.
-Mirrors kf-observer's vet-then-accept path without requiring a local Hab
-for the TEL issuer (presentation registries live in wallets).
 """
 
 from collections import defaultdict

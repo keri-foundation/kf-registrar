@@ -2,7 +2,7 @@
 """
 kfregistrar.core.serving module
 
-Dual HTTP registrar node: localhost controller API and observer-only bulk TEL face.
+Dual HTTP registrar node: localhost controller API and observer-only bulk TEL API.
 """
 
 from urllib.parse import urlsplit
@@ -158,7 +158,7 @@ def makeContext(hby, alias="registrar", observers=None, **kwa):
     Parameters:
         hby (Habery): habitat environment that owns the issuer identifier.
         alias (str): habitat name for the registrar/issuer controller.
-        observers (list[str] | None): observer AIDs allowed on the external face.
+        observers (list[str] | None): observer AIDs allowed on the external API.
             Combined with any ``observers`` list in Habery config.
 
     Returns:
@@ -222,7 +222,7 @@ def setup(
         bootPort (int): port for the internal controller API.
         host (str): bind address for the observer-facing API.
         port (int): port for the observer-facing API.
-        observers (list[str] | None): observer AIDs allowed on the external face.
+        observers (list[str] | None): observer AIDs allowed on the external API.
             Combined with any ``observers`` list in Habery config.
         keypath, certpath, cafilepath: optional TLS material for both servers.
 
