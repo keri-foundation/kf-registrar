@@ -18,6 +18,7 @@ from keri.core.kraming import Kramer
 from keri.db.basing import BaserDoer
 
 from kfregistrar.app import httping
+from kfregistrar.core.ingesting import ControllerIngester
 
 
 logger = help.ogler.getLogger()
@@ -62,18 +63,20 @@ class Context(doing.DoDoer):
         self.rgy = rgy
         self.registrar = Registrar(rgy=rgy)
         self.kvy = kvy
+        self.ingester = ControllerIngester(hby=hby, store=rgy.store, kvy=kvy)
         self.observers = osetOf(observers)
         self.internalApp = None
         self.externalApp = None
         super(Context, self).__init__(doers=[doing.doify(self.escrowDo)])
 
     def escrowDo(self, tymth=None, tock=0.0, **kwa):
-        """Replay registry escrows while the node is running."""
+        """Replay registry escrows and retry pending controller ingest."""
         self.wind(tymth)
         self.tock = tock
         _ = yield self.tock
         while True:
             self.rgy.processEscrows()
+            self.ingester.retryPending()
             yield self.tock
 
 
@@ -139,6 +142,7 @@ def loadInternalEnds(app, ctx):
     app.add_route("/registries", httping.RegistriesCollectionEnd(ctx))
     app.add_route("/registries/{regk}", httping.RegistryResourceEnd(ctx))
     app.add_route("/registries/{regk}/updates", httping.RegistryUpdateEnd(ctx))
+    app.add_route("/ingest", httping.IngestEnd(ctx))
 
 
 def loadExternalEnds(app, ctx):

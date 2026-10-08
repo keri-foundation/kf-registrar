@@ -10,13 +10,19 @@ import falcon
 from falcon import testing
 
 from keri import Vrsn_2_0
-from keri.acdc import acdcmap
-from keri.app.habbing import openHby
+from keri.acdc import acdcmap, blindate, regcept
+from keri.app.habbing import openHab, openHby
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import SerderACDC, query
+from keri.core import Blinder, SerderACDC, query
+from keri.core.signing import Salter
 from keri.help import helping
 
 from kfregistrar.core.serving import makeContext
+
+
+STAMP0 = "2025-07-04T17:50:00.000000+00:00"
+STAMP1 = "2025-08-01T18:06:10.988921+00:00"
+SALT = Salter(raw=b"0123456789abcdef").qb64
 
 
 def _postCesr(client, hab, serder, path="/"):
@@ -48,6 +54,29 @@ def _bulkQuery(hab, regk=None, route="tels/bulk", **qextra):
         stamp=helping.nowIso8601(),
         version=Vrsn_2_0,
     )
+
+
+def _seal(serder):
+    return dict(s=serder.sad["n"], d=serder.said)
+
+
+def _anchor(hab, *serders):
+    hab.interact(data=[_seal(serder) for serder in serders])
+
+
+def _telStream(*serders):
+    stream = bytearray()
+    for serder in serders:
+        stream.extend(serder.raw)
+    return bytes(stream)
+
+
+def _kelClone(hab):
+    """Return CESR text of the habitat's KEL for controller ingest."""
+    stream = bytearray()
+    for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=Vrsn_2_0):
+        stream.extend(msg)
+    return stream.decode("utf-8")
 
 
 def test_internal_rip_bup_land_in_regbaser():
@@ -169,5 +198,144 @@ def test_health_on_both_faces():
                 response = client.simulate_get("/health")
                 assert response.status == falcon.HTTP_200
                 assert response.json["status"] == "ok"
+        finally:
+            ctx.rgy.close()
+
+
+def test_controller_ingest_hosts_foreign_tel_for_observer_bulk():
+    """Wallet-built TEL + KEL via admin ingest is served on observer bulk."""
+    with openHab(name="kf-wallet", temp=True, version=Vrsn_2_0) as (_whby, wallet):
+        rip = regcept(israid=wallet.pre, stamp=STAMP0)
+        _anchor(wallet, rip)
+        acdc = acdcmap(
+            israid=wallet.pre,
+            regid=rip.said,
+            attribute=dict(d="", name="presentation"),
+        )
+        blinder = Blinder.blind(
+            acdc=acdc.said, state="issued", salt=SALT, sn=1
+        )
+        bup = blindate(
+            regid=rip.said,
+            prior=rip.said,
+            blid=blinder.said,
+            sn=1,
+            stamp=STAMP1,
+        )
+        _anchor(wallet, bup)
+        kel = _kelClone(wallet)
+        tel = _telStream(rip, bup).decode("utf-8")
+        telBytes = _telStream(rip, bup)
+        regk = rip.said
+        walletPre = wallet.pre
+
+    with openHby(name="kf-reg-ingest", base="test", temp=True, version=Vrsn_2_0) as hby:
+        hby.makeHab(name="registrar")
+        observer = hby.makeHab(name="observer")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[observer.pre])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            ingested = inner.simulate_post(
+                "/ingest",
+                json=dict(kel=kel, tel=tel),
+            )
+            assert ingested.status == falcon.HTTP_200
+            assert regk in ingested.json["accepted"]
+            assert ingested.json["accepted"][regk] == 2
+            assert ctx.rgy.store.cloneTel(regk) == telBytes
+
+            listed = inner.simulate_get("/registries")
+            assert listed.status == falcon.HTTP_200
+            hosted = [item for item in listed.json["registries"] if item["regk"] == regk]
+            assert len(hosted) == 1
+            assert hosted[0]["name"] is None
+            assert hosted[0]["issuer"] == walletPre
+
+            cloned = inner.simulate_get(f"/registries/{regk}")
+            assert cloned.status == falcon.HTTP_200
+            assert cloned.content == telBytes
+
+            outer = testing.TestClient(ctx.externalApp)
+            qry = _bulkQuery(observer, regk=regk, route="tels/bulk")
+            response = _postCesr(outer, observer, qry)
+            assert response.status == falcon.HTTP_200
+            assert response.content == telBytes
+            assert _telIlks(response.content) == ["rip", "bup"]
+        finally:
+            ctx.rgy.close()
+
+
+def test_controller_ingest_pending_until_kel_anchors():
+    """Unanchored TEL stays pending and is not served until KEL is ingested."""
+    with openHab(name="kf-wallet-pend", temp=True, version=Vrsn_2_0) as (_whby, wallet):
+        rip = regcept(israid=wallet.pre, stamp=STAMP0)
+        acdc = acdcmap(
+            israid=wallet.pre,
+            regid=rip.said,
+            attribute=dict(d="", name="presentation"),
+        )
+        blinder = Blinder.blind(
+            acdc=acdc.said, state="issued", salt=SALT, sn=1
+        )
+        bup = blindate(
+            regid=rip.said,
+            prior=rip.said,
+            blid=blinder.said,
+            sn=1,
+            stamp=STAMP1,
+        )
+        tel = _telStream(rip, bup).decode("utf-8")
+        telBytes = _telStream(rip, bup)
+        regk = rip.said
+
+        with openHby(name="kf-reg-pend", base="test", temp=True, version=Vrsn_2_0) as hby:
+            hby.makeHab(name="registrar")
+            observer = hby.makeHab(name="observer")
+            ctx = makeContext(hby=hby, alias="registrar", observers=[observer.pre])
+            try:
+                inner = testing.TestClient(ctx.internalApp)
+                pending = inner.simulate_post(
+                    "/ingest",
+                    json=dict(kel="", tel=tel),
+                )
+                assert pending.status == falcon.HTTP_200
+                assert regk in pending.json["pending"]
+                assert ctx.rgy.store.head(regk) is None
+
+                outer = testing.TestClient(ctx.externalApp)
+                qry = _bulkQuery(observer, regk=regk, route="tels/bulk")
+                missing = _postCesr(outer, observer, qry)
+                assert missing.status == falcon.HTTP_404
+
+                _anchor(wallet, rip, bup)
+                kel = _kelClone(wallet)
+                accepted = inner.simulate_post(
+                    "/ingest",
+                    json=dict(kel=kel, tel=tel),
+                )
+                assert accepted.status == falcon.HTTP_200
+                assert regk in accepted.json["accepted"]
+                assert ctx.rgy.store.headEvent(regk).said == bup.said
+
+                qry2 = _bulkQuery(observer, regk=regk, route="tels/bulk")
+                response = _postCesr(outer, observer, qry2)
+                assert response.status == falcon.HTTP_200
+                assert response.content == telBytes
+            finally:
+                ctx.rgy.close()
+
+
+def test_external_face_has_no_ingest_route():
+    """Controller ingest is admin-only; external face has no write path."""
+    with openHby(name="kf-reg-no-ingest", base="test", temp=True, version=Vrsn_2_0) as hby:
+        hby.makeHab(name="registrar")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[])
+        try:
+            outer = testing.TestClient(ctx.externalApp)
+            response = outer.simulate_post(
+                "/ingest",
+                json=dict(kel="", tel=""),
+            )
+            assert response.status == falcon.HTTP_404
         finally:
             ctx.rgy.close()

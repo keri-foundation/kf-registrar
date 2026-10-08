@@ -19,6 +19,8 @@ from keri.kering import (
     ValidationError,
 )
 
+from kfregistrar.core.ingesting import allRegistrySaids, knownRegistry
+
 BULK_ROUTES = ("tels/bulk", "regs")
 WALLET_ROUTES = ("tels", "tsn", "logs", "ksn", "mbx")
 
@@ -33,11 +35,14 @@ def _snFromQuery(qry):
     return Number(num=sn).sn
 
 
-def _registrySaids(qry, rgy):
-    """Resolve registry SAIDs from a bulk query block."""
+def _registrySaids(qry, store, rgy):
+    """Resolve registry SAIDs from a bulk query block.
+
+    Empty ``i`` means all locally managed and hosted registries.
+    """
     raw = qry.get("i")
     if raw is None or raw == "":
-        return list(rgy.regs.keys())
+        return allRegistrySaids(store, rgy)
     if isinstance(raw, str):
         return [raw]
     return list(raw)
@@ -107,19 +112,27 @@ class QueryRejectEnd:
 
 
 class RegistriesCollectionEnd:
-    """Internal create/list of registries this node governs."""
+    """Internal create/list of registries this node governs or hosts."""
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     def on_get(self, _req, rep):
         items = []
+        seen = set()
         for name, registry in self.ctx.rgy.names.items():
             items.append(dict(
                 name=name,
                 regk=registry.regk,
                 issuer=registry.hab.pre,
             ))
+            seen.add(registry.regk)
+        for regk in allRegistrySaids(self.ctx.rgy.store, self.ctx.rgy):
+            if regk in seen:
+                continue
+            rip = self.ctx.rgy.store.seqEvent(regk, 0)
+            issuer = rip.sad.get("i") if rip is not None else None
+            items.append(dict(name=None, regk=regk, issuer=issuer))
         rep.media = dict(registries=items)
         rep.status = falcon.HTTP_200
 
@@ -158,13 +171,32 @@ class RegistryResourceEnd:
         self.ctx = ctx
 
     def on_get(self, req, rep, regk):
-        if regk not in self.ctx.rgy.regs:
+        if not knownRegistry(self.ctx.rgy.store, self.ctx.rgy, regk):
             raise falcon.HTTPNotFound(description=f"unknown registry {regk}")
         sn = req.get_param_as_int("sn") or 0
         data = self.ctx.rgy.store.cloneTel(regk, sn=sn)
         rep.set_header("Content-Type", CESR_CONTENT_TYPE)
         rep.status = falcon.HTTP_200
         rep.data = data
+
+
+class IngestEnd:
+    """Internal controller publish of pre-built TEL events plus issuer KEL."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def on_post(self, req, rep):
+        body = req.media or {}
+        kel = body.get("kel")
+        tel = body.get("tel")
+        if not tel:
+            raise falcon.HTTPBadRequest(description="'tel' is required")
+        if kel is None:
+            kel = ""
+
+        rep.media = self.ctx.ingester.ingest(kel=kel, tel=tel)
+        rep.status = falcon.HTTP_200
 
 
 class RegistryUpdateEnd:
@@ -270,16 +302,20 @@ class BulkQueryEnd:
                 raise falcon.HTTPUnauthorized(description="KRAM rejected query")
 
         sn = _snFromQuery(qry)
-        regks = _registrySaids(qry, self.ctx.rgy)
-        unknown = [regk for regk in regks if regk not in self.ctx.rgy.regs]
+        store = self.ctx.rgy.store
+        regks = _registrySaids(qry, store, self.ctx.rgy)
+        unknown = [
+            regk for regk in regks
+            if not knownRegistry(store, self.ctx.rgy, regk)
+        ]
         if unknown and qry.get("i"):
             raise falcon.HTTPNotFound(
                 description=f"unknown registry {unknown[0]}"
             )
 
         data = cloneRegs(
-            self.ctx.rgy.store,
-            [regk for regk in regks if regk in self.ctx.rgy.regs],
+            store,
+            [regk for regk in regks if knownRegistry(store, self.ctx.rgy, regk)],
             sn=sn,
         )
         rep.set_header("Content-Type", CESR_CONTENT_TYPE)
