@@ -378,6 +378,28 @@ def test_controller_ingest_rejects_conflicting_anchored_tel_fork():
         finally:
             ctx.rgy.close()
 
+    with openHby(
+        name="kf-reg-fork-reverse-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
+        hby.makeHab(name="registrar")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            accepted = inner.simulate_post(
+                "/ingest", json=dict(kel=kel, tel=_telStream(rip, second).decode())
+            )
+            assert regk in accepted.json["accepted"]
+
+            conflict = inner.simulate_post(
+                "/ingest", json=dict(kel="", tel=_telStream(rip, first).decode())
+            )
+            assert regk in conflict.json["rejected"]
+            assert ctx.rgy.store.seqEvent(regk, 1).said == second.said
+            assert ctx.rgy.store.headEvent(regk).said == second.said
+            assert ctx.rgy.store.cloneTel(regk) == _telStream(rip, second)
+        finally:
+            ctx.rgy.close()
+
 
 def test_controller_ingest_replay_preserves_latest_and_accepts_forward_progress():
     """Replaying older anchored TEL keeps the head monotonic; newer TEL advances it."""
