@@ -330,9 +330,7 @@ def test_controller_ingest_rejects_conflicting_anchored_tel_fork():
             regid=rip.said,
             attribute=dict(d="", name="forked-history"),
         )
-        first_blinder = Blinder.blind(
-            acdc=acdc.said, state="issued", salt=SALT, sn=1
-        )
+        first_blinder = Blinder.blind(acdc=acdc.said, state="issued", salt=SALT, sn=1)
         first = blindate(
             regid=rip.said,
             prior=rip.said,
@@ -357,7 +355,9 @@ def test_controller_ingest_rejects_conflicting_anchored_tel_fork():
         kel = _kelClone(wallet)
         regk = rip.said
 
-    with openHby(name="kf-reg-fork-host", base="test", temp=True, version=Vrsn_2_0) as hby:
+    with openHby(
+        name="kf-reg-fork-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
         hby.makeHab(name="registrar")
         ctx = makeContext(hby=hby, alias="registrar", observers=[])
         try:
@@ -428,7 +428,9 @@ def test_controller_ingest_replay_preserves_latest_and_accepts_forward_progress(
         kel = _kelClone(wallet)
         regk = rip.said
 
-    with openHby(name="kf-reg-replay-host", base="test", temp=True, version=Vrsn_2_0) as hby:
+    with openHby(
+        name="kf-reg-replay-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
         hby.makeHab(name="registrar")
         ctx = makeContext(hby=hby, alias="registrar", observers=[])
         try:
@@ -457,7 +459,9 @@ def test_controller_ingest_replay_preserves_latest_and_accepts_forward_progress(
             ctx.rgy.close()
 
 
-def test_controller_pending_tel_survives_restart_and_recovers_when_kel_arrives(tmp_path):
+def test_controller_pending_tel_survives_restart_and_recovers_when_kel_arrives(
+    tmp_path,
+):
     """Missing-anchor TEL is durable and retries after a registrar restart."""
     with openHab(name="kf-reg-restart-wallet", temp=True, version=Vrsn_2_0) as (
         _whby,

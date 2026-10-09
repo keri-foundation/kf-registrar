@@ -166,13 +166,9 @@ class ControllerIngester:
         pending = {}
         for regk, events in escrowed.items():
             ordered = sorted(events.values(), key=lambda pair: pair[0])
-            rip = next(
-                (serder for _sn, serder in ordered if serder.ilk == "rip"), None
-            )
+            rip = next((serder for _sn, serder in ordered if serder.ilk == "rip"), None)
             if rip is not None:
-                updates = [
-                    serder for _sn, serder in ordered if serder.ilk == "bup"
-                ]
+                updates = [serder for _sn, serder in ordered if serder.ilk == "bup"]
                 pending[regk] = (rip, updates)
         return pending
 
@@ -262,9 +258,7 @@ class ControllerIngester:
             logger.info("controller ingest rejected registry %s: %s", regk, ex)
             return "rejected", str(ex)
 
-        chain = [rip] + sorted(
-            updates, key=lambda s: Number(numh=s.sad["n"]).num
-        )
+        chain = [rip] + sorted(updates, key=lambda s: Number(numh=s.sad["n"]).num)
         conflict = _acceptTelChain(self.store, regk, chain)
         if conflict is not None:
             self.pending.pop(regk, None)
