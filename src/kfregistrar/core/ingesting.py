@@ -8,10 +8,33 @@ from collections import defaultdict
 from keri import Vrsn_2_0, help
 from keri.acdc import regeventing
 from keri.core import Number, Parser, SerderACDC
+from keri.core.coring import Saider
 from keri.kering import MissingAnchorError, ValidationError
 
 
 logger = help.ogler.getLogger()
+
+
+def _acceptTelChain(store, regk, chain):
+    """Persist a verified chain without replacing slots or regressing its head."""
+    sequenced = [(Number(numh=serder.sad["n"]).num, serder) for serder in chain]
+    for sn, serder in sequenced:
+        current = store.seqEvent(regk, sn)
+        if current is not None and current.said != serder.said:
+            return f"conflicting TEL event at registry {regk} sequence {sn}"
+
+    for sn, serder in sequenced:
+        if store.seqEvent(regk, sn) is not None:
+            continue
+
+        # Keep valid historical gaps queryable while only moving the head
+        # forward. RegistryStore.accept pins the head unconditionally.
+        store.putEvent(serder)
+        store.baser.tels.put(keys=regk, on=sn, val=Saider(qb64=serder.said))
+        head = store.headEvent(regk)
+        if head is None or sn > Number(numh=head.sad["n"]).num:
+            store.baser.heads.pin(keys=regk, val=Saider(qb64=serder.said))
+    return None
 
 
 def parseTelStream(stream):
@@ -127,7 +150,27 @@ class ControllerIngester:
         self.store = store
         self.kvy = kvy
         # Pending batches awaiting issuer KEL anchors: regk -> (rip, updates)
-        self.pending = {}
+        self.pending = self._restorePending()
+
+    def _restorePending(self):
+        """Rebuild retry batches from durable missing-anchor escrow rows."""
+        escrowed = defaultdict(dict)
+        for keys, sn, said in self.store.baser.maes.getTopItemIter():
+            regk = keys[0] if isinstance(keys, tuple) else keys
+            if isinstance(regk, bytes):
+                regk = regk.decode("utf-8")
+            serder = self.store.event(said)
+            if serder is not None:
+                escrowed[regk][serder.said] = (sn, serder)
+
+        pending = {}
+        for regk, events in escrowed.items():
+            ordered = sorted(events.values(), key=lambda pair: pair[0])
+            rip = next((serder for _sn, serder in ordered if serder.ilk == "rip"), None)
+            if rip is not None:
+                updates = [serder for _sn, serder in ordered if serder.ilk == "bup"]
+                pending[regk] = (rip, updates)
+        return pending
 
     def ingest(self, kel, tel):
         """Ingest issuer KEL then verify and store TEL events.
@@ -195,9 +238,11 @@ class ControllerIngester:
             regeventing.vet(rip=rip, updates=updates, db=self.hby.db)
         except MissingAnchorError as ex:
             self.pending[regk] = (rip, list(updates))
+            self.store.putEvent(rip)
             self.store.escrowMissingAnchor(regk, 0, rip.said)
             for bup in updates:
                 sn = Number(numh=bup.sad["n"]).num
+                self.store.putEvent(bup)
                 self.store.escrowMissingAnchor(regk, sn, bup.said)
             logger.info(
                 "controller ingest escrow registry %s pending KEL anchor: %s",
@@ -207,14 +252,23 @@ class ControllerIngester:
             return "pending", len(updates) + 1
         except ValidationError as ex:
             self.pending.pop(regk, None)
+            for serder in [rip] + list(updates):
+                sn = Number(numh=serder.sad["n"]).num
+                self.store.clearEscrows(regk, sn, serder.said)
             logger.info("controller ingest rejected registry %s: %s", regk, ex)
             return "rejected", str(ex)
 
-        chain = [rip] + sorted(
-            updates, key=lambda s: Number(numh=s.sad["n"]).num
-        )
+        chain = [rip] + sorted(updates, key=lambda s: Number(numh=s.sad["n"]).num)
+        conflict = _acceptTelChain(self.store, regk, chain)
+        if conflict is not None:
+            self.pending.pop(regk, None)
+            for serder in chain:
+                sn = Number(numh=serder.sad["n"]).num
+                self.store.clearEscrows(regk, sn, serder.said)
+            logger.info("controller ingest rejected registry %s: %s", regk, conflict)
+            return "rejected", conflict
         for serder in chain:
             sn = Number(numh=serder.sad["n"]).num
-            self.store.accept(regk, sn, serder)
+            self.store.clearEscrows(regk, sn, serder.said)
         self.pending.pop(regk, None)
         return "accepted", len(chain)

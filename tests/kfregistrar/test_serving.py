@@ -3,14 +3,17 @@ import falcon
 from falcon import testing
 
 from keri import Vrsn_2_0
-from keri.acdc import acdcmap, blindate, regcept
+from keri.acdc import Regery, acdcmap, blindate, regcept
+from keri.acdc.regbasing import RegBaser
 from keri.app.habbing import openHab, openHby
+from keri.app.configing import Configer
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import Blinder, SerderACDC, query
+from keri.core import Blinder, Kevery, SerderACDC, query
 from keri.core.signing import Salter
 from keri.help import helping
 
-from kfregistrar.core.serving import makeContext
+from kfregistrar.core.serving import Context, makeContext
+from kfregistrar.core.ingesting import ControllerIngester, ingestKel
 
 
 STAMP0 = "2025-07-04T17:50:00.000000+00:00"
@@ -316,6 +319,239 @@ def test_controller_ingest_pending_until_kel_anchors():
                 assert response.content == telBytes
             finally:
                 ctx.rgy.close()
+
+
+def test_controller_ingest_rejects_conflicting_anchored_tel_fork():
+    """A second valid seal for the same TEL slot cannot split stored history."""
+    with openHab(name="kf-reg-fork", temp=True, version=Vrsn_2_0) as (_whby, wallet):
+        rip = regcept(israid=wallet.pre, stamp=STAMP0)
+        acdc = acdcmap(
+            israid=wallet.pre,
+            regid=rip.said,
+            attribute=dict(d="", name="forked-history"),
+        )
+        first_blinder = Blinder.blind(acdc=acdc.said, state="issued", salt=SALT, sn=1)
+        first = blindate(
+            regid=rip.said,
+            prior=rip.said,
+            blid=first_blinder.said,
+            sn=1,
+            stamp=STAMP1,
+        )
+        second_blinder = Blinder.blind(
+            acdc=acdc.said,
+            state="revoked",
+            salt=Salter(raw=b"fedcba9876543210").qb64,
+            sn=1,
+        )
+        second = blindate(
+            regid=rip.said,
+            prior=rip.said,
+            blid=second_blinder.said,
+            sn=1,
+            stamp=STAMP1,
+        )
+        _anchor(wallet, rip, first, second)
+        kel = _kelClone(wallet)
+        regk = rip.said
+
+    with openHby(
+        name="kf-reg-fork-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
+        hby.makeHab(name="registrar")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            accepted = inner.simulate_post(
+                "/ingest", json=dict(kel=kel, tel=_telStream(rip, first).decode())
+            )
+            assert accepted.status == falcon.HTTP_200
+            assert regk in accepted.json["accepted"]
+
+            conflict = inner.simulate_post(
+                "/ingest", json=dict(kel="", tel=_telStream(rip, second).decode())
+            )
+            assert regk in conflict.json["rejected"]
+            assert ctx.rgy.store.seqEvent(regk, 1).said == first.said
+            assert ctx.rgy.store.headEvent(regk).said == first.said
+            assert ctx.rgy.store.cloneTel(regk) == _telStream(rip, first)
+        finally:
+            ctx.rgy.close()
+
+    with openHby(
+        name="kf-reg-fork-reverse-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
+        hby.makeHab(name="registrar")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            accepted = inner.simulate_post(
+                "/ingest", json=dict(kel=kel, tel=_telStream(rip, second).decode())
+            )
+            assert regk in accepted.json["accepted"]
+
+            conflict = inner.simulate_post(
+                "/ingest", json=dict(kel="", tel=_telStream(rip, first).decode())
+            )
+            assert regk in conflict.json["rejected"]
+            assert ctx.rgy.store.seqEvent(regk, 1).said == second.said
+            assert ctx.rgy.store.headEvent(regk).said == second.said
+            assert ctx.rgy.store.cloneTel(regk) == _telStream(rip, second)
+        finally:
+            ctx.rgy.close()
+
+
+def test_controller_ingest_replay_preserves_latest_and_accepts_forward_progress():
+    """Replaying older anchored TEL keeps the head monotonic; newer TEL advances it."""
+    with openHab(name="kf-reg-replay", temp=True, version=Vrsn_2_0) as (_whby, wallet):
+        rip = regcept(israid=wallet.pre, stamp=STAMP0)
+        acdc = acdcmap(
+            israid=wallet.pre,
+            regid=rip.said,
+            attribute=dict(d="", name="monotonic-history"),
+        )
+
+        def update(prior, sn, state):
+            blinder = Blinder.blind(acdc=acdc.said, state=state, salt=SALT, sn=sn)
+            return blindate(
+                regid=rip.said,
+                prior=prior,
+                blid=blinder.said,
+                sn=sn,
+                stamp=STAMP1,
+            )
+
+        first = update(rip.said, 1, "issued")
+        second = update(first.said, 2, "revoked")
+        third = update(second.said, 3, "reinstated")
+        _anchor(wallet, rip, first, second, third)
+        kel = _kelClone(wallet)
+        regk = rip.said
+
+    with openHby(
+        name="kf-reg-replay-host", base="test", temp=True, version=Vrsn_2_0
+    ) as hby:
+        hby.makeHab(name="registrar")
+        ctx = makeContext(hby=hby, alias="registrar", observers=[])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            initial = inner.simulate_post(
+                "/ingest",
+                json=dict(kel=kel, tel=_telStream(rip, first, second).decode()),
+            )
+            assert regk in initial.json["accepted"]
+            assert ctx.rgy.store.headEvent(regk).said == second.said
+
+            replay = inner.simulate_post(
+                "/ingest", json=dict(kel="", tel=_telStream(rip, first).decode())
+            )
+            assert regk in replay.json["accepted"]
+            assert ctx.rgy.store.headEvent(regk).said == second.said
+            assert ctx.rgy.store.cloneTel(regk) == _telStream(rip, first, second)
+
+            advanced = inner.simulate_post(
+                "/ingest",
+                json=dict(kel="", tel=_telStream(rip, first, second, third).decode()),
+            )
+            assert regk in advanced.json["accepted"]
+            assert ctx.rgy.store.headEvent(regk).said == third.said
+        finally:
+            ctx.rgy.close()
+
+
+def test_controller_pending_tel_survives_restart_and_recovers_when_kel_arrives(
+    tmp_path,
+):
+    """Missing-anchor TEL is durable and retries after a registrar restart."""
+    with openHab(name="kf-reg-restart-wallet", temp=True, version=Vrsn_2_0) as (
+        _whby,
+        wallet,
+    ):
+        rip = regcept(israid=wallet.pre, stamp=STAMP0)
+        acdc = acdcmap(
+            israid=wallet.pre,
+            regid=rip.said,
+            attribute=dict(d="", name="restart-pending"),
+        )
+        blinder = Blinder.blind(acdc=acdc.said, state="issued", salt=SALT, sn=1)
+        bup = blindate(
+            regid=rip.said,
+            prior=rip.said,
+            blid=blinder.said,
+            sn=1,
+            stamp=STAMP1,
+        )
+        _anchor(wallet, rip, bup)
+        kel = _kelClone(wallet)
+        tel = _telStream(rip, bup)
+        regk = rip.said
+
+    def openRestartHby():
+        return openHby(
+            name="kf-reg-restart-host",
+            base="test",
+            temp=False,
+            headDirPath=str(tmp_path),
+            cf=Configer(
+                name="kf-reg-restart-host",
+                base="test",
+                temp=True,
+                headDirPath=str(tmp_path),
+            ),
+            salt=SALT,
+            version=Vrsn_2_0,
+        )
+
+    with openRestartHby() as hby:
+        hby.makeHab(name="registrar")
+        baser = RegBaser(
+            name=hby.name, base=hby.base, temp=False, headDirPath=str(tmp_path)
+        )
+        rgy = Regery(hby=hby, name=hby.name, base=hby.base, baser=baser)
+        ingester = ControllerIngester(
+            hby=hby,
+            store=rgy.store,
+            kvy=Kevery(db=hby.db, lax=True, local=False),
+        )
+        try:
+            pending = ingester.ingest(b"", tel)
+            assert regk in pending["pending"]
+            assert rgy.store.head(regk) is None
+            assert list(rgy.store.baser.maes.getTopItemIter(keys=regk))
+        finally:
+            rgy.close()
+
+    with openRestartHby() as hby:
+        baser = RegBaser(
+            name=hby.name, base=hby.base, temp=False, headDirPath=str(tmp_path)
+        )
+        rgy = Regery(hby=hby, name=hby.name, base=hby.base, baser=baser)
+        ingester = ControllerIngester(
+            hby=hby,
+            store=rgy.store,
+            kvy=Kevery(db=hby.db, lax=True, local=False),
+        )
+        try:
+            assert regk in ingester.pending
+            # The process restart must reconstruct pending event bodies from
+            # the database escrow. Once the KEL arrives, Context's normal
+            # escrow cycle retries that recovered batch.
+            ingestKel(ingester.kvy, kel)
+            ctx = Context(
+                hby=hby,
+                hab=hby.habByName(name="registrar"),
+                rgy=rgy,
+                kvy=ingester.kvy,
+                observers=[],
+            )
+            escrowDo = ctx.escrowDo(tymth=lambda: 0.0, tock=0.1)
+            next(escrowDo)
+            next(escrowDo)
+            assert rgy.store.headEvent(regk).said == bup.said
+            assert rgy.store.cloneTel(regk) == tel
+            assert not list(rgy.store.baser.maes.getTopItemIter(keys=regk))
+        finally:
+            rgy.close()
 
 
 def test_external_api_has_no_ingest_route():
