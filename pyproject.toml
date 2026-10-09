@@ -1,0 +1,54 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kf-registrar"
+version = "0.0.1"
+description = "KERI Foundation registrar service for V2 ACDC transaction event logs"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { file = "LICENSE" }
+
+authors = [
+    { name = "KERI Foundation" },
+]
+
+keywords = ["keri-foundation", "cryptography", "KERI", "ACDC"]
+
+classifiers = [
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "hio>=0.7.19",
+    "keri @ git+https://github.com/WebOfTrust/keripy.git",
+    "multicommand>=1.0.0",
+    "falcon>=4.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.11.0,<0.16",
+]
+
+[project.scripts]
+kf-registrar = "kfregistrar.app.cli.kfregistrar:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["kfregistrar*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+
+[tool.uv.sources]
+keri = { path = "../keripy", editable = true }
