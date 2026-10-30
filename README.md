@@ -28,6 +28,28 @@ There is no registrar pool, no TEL receipts, and no wallet-shaped
 `GET /query?typ=tel`. Wallets and verifiers must not query this service for
 TEL status; they talk to an observer.
 
+## Introduce an observer
+
+Before its first signed query, an observer publishes its public key history to
+`POST /introductions` on the external port. Send the signed V2 KEL clone as raw
+CESR with `Content-Type: application/cesr`. Native KERI validation checks
+new events, signatures, delegation, and witness receipts. The response is
+`{"prefixes": ["<observer AID>"]}` after all supplied events are accepted.
+Malformed, unsigned, or unaccepted history returns HTTP 400.
+
+The registrar accepts history only for AIDs configured with `--observer` and
+the delegators their delegated inception events name. Supply each delegator's
+history, including its delegation anchors, before the dependent observer history.
+Any other event prefix in the stream returns HTTP 403 before processing.
+Native validation processes events one at a time, so events accepted or
+escrowed before a later failure stay in the registrar database. Resend the
+complete clone to finish the introduction. Previously accepted events, including
+history superseded by recovery, are skipped using the native first-seen log.
+
+An introduction supplies verification keys. It does not grant access. Each
+query must still pass KRAM. Publish updated public history after a rotation.
+Do not send private keys or credential data to this endpoint.
+
 ## Requirements
 
 - Python >= 3.14

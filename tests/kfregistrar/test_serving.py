@@ -9,7 +9,10 @@ from keri.acdc.regbasing import RegBaser
 from keri.app.habbing import openHab, openHby
 from keri.app.configing import Configer
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import Blinder, Kevery, SerderACDC, query
+from keri.core import (
+    Blinder, Codens, Counter, Kevery, Number, Saider, SealSource,
+    SerderACDC, messagize, query, rotate,
+)
 from keri.core.signing import Salter
 from keri.help import helping
 from keri.kering import MissingAnchorError
@@ -135,11 +138,68 @@ def test_internal_rip_bup_land_in_regbaser():
             ctx.rgy.close()
 
 
+@pytest.mark.parametrize("invalid, status", [
+    ("empty", falcon.HTTP_400),
+    ("unsigned", falcon.HTTP_400),
+    ("truncated", falcon.HTTP_400),
+    ("trailing", falcon.HTTP_400),
+    ("signature", falcon.HTTP_400),
+    ("query", falcon.HTTP_400),
+    ("outsider", falcon.HTTP_403),
+    ("group", falcon.HTTP_400),
+    ("said", falcon.HTTP_400),
+])
+def test_introduction_rejects_invalid_history(invalid, status):
+    """An invalid introduction cannot enable a fresh observer's signed query."""
+    with openHby(name="intro-registrar", temp=True, version=Vrsn_2_0) as hby, \
+            openHab(name="intro-observer", temp=True, version=Vrsn_2_0) as (remote, observer):
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            raw = _kelClone(observer).encode()
+            if invalid == "empty":
+                raw = b""
+            elif invalid == "unsigned":
+                raw = observer.kever.serder.raw
+            elif invalid == "truncated":
+                raw = raw[:-1]
+            elif invalid == "trailing":
+                raw += b"invalid trailing bytes"
+            elif invalid == "signature":
+                other = remote.makeHab(name="other")
+                sigers = other.sign(ser=observer.kever.serder.raw, indexed=True)
+                raw = messagize(observer.kever.serder, sigers=sigers, gvrsn=Vrsn_2_0)
+            elif invalid == "query":
+                raw = observer.endorse(_bulkQuery(observer), last=True,
+                                       framed=False, gvrsn=Vrsn_2_0)
+            elif invalid == "outsider":
+                outsider = remote.makeHab(name="outsider")
+                raw += _kelClone(outsider).encode()
+            elif invalid == "group":
+                raw = Counter(Codens.GenericGroup, count=len(raw) // 4,
+                              version=Vrsn_2_0).qb64b + raw
+            elif invalid == "said":
+                raw = raw.replace(observer.kever.serder.saidb, b"E" + b"A" * 43)
+
+            client = testing.TestClient(ctx.externalApp)
+            response = client.simulate_post(
+                "/introductions", body=bytes(raw),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert response.status == status
+            assert observer.pre not in hby.kevers
+            if invalid == "outsider":
+                assert outsider.pre not in hby.kevers
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_401
+        finally:
+            ctx.rgy.close()
+
+
 def test_whitelisted_observer_pulls_contiguous_tel():
     """Allow-listed observer POST of tels/bulk returns rip then bup as CESR."""
-    with openHby(name="kf-reg-obs", base="test", temp=True, version=Vrsn_2_0) as hby:
+    with openHby(name="kf-reg-obs", base="test", temp=True, version=Vrsn_2_0) as hby, \
+            openHab(name="remote-observer", temp=True, version=Vrsn_2_0) as (remote, observer):
         hby.makeHab(name="registrar")
-        observer = hby.makeHab(name="observer")
+        observer.rotate(gvrsn=Vrsn_2_0)
         ctx = makeContext(hby=hby, alias="registrar", observers=[observer.pre])
         try:
             inner = testing.TestClient(ctx.internalApp)
@@ -157,12 +217,169 @@ def test_whitelisted_observer_pulls_contiguous_tel():
             )
 
             outer = testing.TestClient(ctx.externalApp)
+            unknown = _postCesr(outer, observer, _bulkQuery(observer, regk=regk))
+            assert unknown.status == falcon.HTTP_401
+            introduced = outer.simulate_post(
+                "/introductions", body=_kelClone(observer),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert introduced.status == falcon.HTTP_200
+            assert introduced.json == dict(prefixes=[observer.pre])
+            assert hby.kevers[observer.pre].sn == observer.kever.sn
+
+            outsider = remote.makeHab(name="outsider")
+            introduced = outer.simulate_post(
+                "/introductions", body=_kelClone(outsider),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert introduced.status == falcon.HTTP_403
+            assert outsider.pre not in hby.kevers
+            assert _postCesr(outer, outsider, _bulkQuery(outsider)).status == falcon.HTTP_403
+
             qry = _bulkQuery(observer, regk=regk, route="tels/bulk")
             response = _postCesr(outer, observer, qry)
             assert response.status == falcon.HTTP_200
             assert response.headers["content-type"] == CESR_CONTENT_TYPE
             assert response.content == ctx.rgy.store.cloneTel(regk)
             assert _telIlks(response.content) == ["rip", "bup"]
+
+            # Knowing the observer's public keys never authorizes an impostor.
+            forged = _postCesr(outer, outsider, _bulkQuery(observer, regk=regk))
+            assert forged.status == falcon.HTTP_401
+            observer.rotate(gvrsn=Vrsn_2_0)
+            assert _postCesr(outer, observer, _bulkQuery(observer)).status == falcon.HTTP_401
+            updated = outer.simulate_post(
+                "/introductions", body=_kelClone(observer),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert updated.status == falcon.HTTP_200
+            assert _postCesr(outer, observer, _bulkQuery(observer)).status == falcon.HTTP_200
+        finally:
+            ctx.rgy.close()
+
+
+def test_introduction_retry_preserves_accepted_recovery_history():
+    """A full clone remains replayable after recovery supersedes an interaction."""
+    with openHby(name="intro-replay", temp=True, version=Vrsn_2_0) as hby, \
+            openHab(name="intro-replay-observer", temp=True, version=Vrsn_2_0) as (remote, observer):
+        inception = observer.kever.serder
+        observer.interact(gvrsn=Vrsn_2_0)
+        verfers, digers = remote.mgr.rotate(pre=observer.pre, temp=True)
+        recovery = rotate(
+            pre=observer.pre, keys=[verfer.qb64 for verfer in verfers],
+            dig=inception.said, sn=1, ndigs=[diger.qb64 for diger in digers],
+            version=Vrsn_2_0,
+        )
+        sigers = observer.sign(ser=recovery.raw, verfers=verfers, rotated=True)
+        remote.kvy.processEvent(serder=recovery, sigers=sigers)
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            client = testing.TestClient(ctx.externalApp)
+            history = _kelClone(observer)
+            introduced = client.simulate_post(
+                "/introductions", body=history,
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert introduced.status == falcon.HTTP_200
+            assert hby.kevers[observer.pre].serder.said == recovery.said
+
+            # Reopen the native store and discard its verifier cache. Accepted
+            # history, including superseded events, must survive cache loss.
+            hby.db.close(clear=False)
+            hby.db.reopen(reuse=True)
+            hby.db.kevers.clear()
+            observer.rotate(gvrsn=Vrsn_2_0)
+            retried = client.simulate_post(
+                "/introductions", body=_kelClone(observer),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert retried.status == falcon.HTTP_200
+            assert hby.kevers[observer.pre].serder.said == observer.kever.serder.said
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_200
+
+            fork = rotate(
+                pre=observer.pre, keys=[verfer.qb64 for verfer in verfers],
+                dig=inception.said, sn=1, ndigs=[inception.said], version=Vrsn_2_0,
+            )
+            assert fork.said != recovery.said
+            rejected = client.simulate_post(
+                "/introductions", body=messagize(
+                    fork, sigers=observer.sign(ser=fork.raw, verfers=verfers),
+                    gvrsn=Vrsn_2_0,
+                ), headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert rejected.status == falcon.HTTP_400
+            assert hby.kevers[observer.pre].serder.said == observer.kever.serder.said
+        finally:
+            ctx.rgy.close()
+
+
+def test_introduction_requires_delegation_before_query_access():
+    """A delegator supplies validation history without acquiring query access."""
+    with openHby(name="intro-delegated", temp=True, version=Vrsn_2_0) as hby, \
+            openHab(name="intro-delegator", temp=True, version=Vrsn_2_0) as (remote, delegator):
+        observer = remote.makeHab(name="delegated-observer", delpre=delegator.pre)
+        inception = observer.kever.serder
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            client = testing.TestClient(ctx.externalApp)
+            unapproved = client.simulate_post(
+                "/introductions", body=_kelClone(delegator) + _kelClone(observer),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert unapproved.status == falcon.HTTP_400
+            assert observer.pre not in hby.kevers
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_401
+            assert hby.kevers[delegator.pre].sn == delegator.kever.sn
+
+            delegator.interact(data=[dict(i=observer.pre, s="0", d=inception.said)],
+                               gvrsn=Vrsn_2_0)
+            bond = SealSource(s=Number(num=delegator.kever.sn),
+                              d=Saider(qb64=delegator.kever.serder.said))
+            delegated = messagize(
+                inception, sigers=observer.sign(ser=inception.raw, indexed=True),
+                bonds=[bond], gvrsn=Vrsn_2_0,
+            )
+            introduced = client.simulate_post(
+                "/introductions", body=_kelClone(delegator).encode() + delegated,
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert introduced.status == falcon.HTTP_200
+            assert hby.kevers[observer.pre].delegated
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_200
+            assert _postCesr(client, delegator, _bulkQuery(delegator)).status == falcon.HTTP_403
+        finally:
+            ctx.rgy.close()
+
+
+def test_introduction_requires_witness_receipt_before_query_access():
+    """An allow-listed observer still needs its inception witness threshold."""
+    with openHby(name="intro-witnessed", temp=True, version=Vrsn_2_0) as hby, \
+            openHab(name="intro-witness", temp=True, transferable=False,
+                    version=Vrsn_2_0) as (remote, witness):
+        observer = remote.makeHab(name="witnessed-observer", wits=[witness.pre], toad=1)
+        inception = observer.kever.serder
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            client = testing.TestClient(ctx.externalApp)
+            missing = client.simulate_post(
+                "/introductions", body=_kelClone(observer),
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert missing.status == falcon.HTTP_400
+            assert observer.pre not in hby.kevers
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_401
+
+            receipted = messagize(
+                inception, sigers=observer.sign(ser=inception.raw, indexed=True),
+                wigers=witness.sign(ser=inception.raw, indexed=True), gvrsn=Vrsn_2_0,
+            )
+            introduced = client.simulate_post(
+                "/introductions", body=receipted,
+                headers={"Content-Type": CESR_CONTENT_TYPE},
+            )
+            assert introduced.status == falcon.HTTP_200
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_200
         finally:
             ctx.rgy.close()
 

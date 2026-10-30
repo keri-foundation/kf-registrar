@@ -148,6 +148,7 @@ def loadInternalEnds(app, ctx):
 def loadExternalEnds(app, ctx):
     """Register observer-only routes on the external Falcon app."""
     app.add_route("/health", httping.HealthEnd())
+    app.add_route("/introductions", httping.IntroductionsEnd(ctx))
     app.add_route("/", httping.BulkQueryEnd(ctx))
     app.add_route("/query", httping.QueryRejectEnd())
 

@@ -7,6 +7,7 @@ observer-only bulk TEL API.
 """
 
 import json
+from dataclasses import asdict
 
 import falcon
 from keri import Vrsn_2_0
@@ -56,8 +57,8 @@ def cloneRegs(store, regks, sn=0):
     return bytes(stream)
 
 
-def _loadQueryStream(req):
-    """Read a signed qry as CESR-over-HTTP JSON+attachment or a raw CESR stream."""
+def _loadCesrStream(req):
+    """Read CESR-over-HTTP JSON+attachment or a raw CESR stream."""
     ctype = (req.content_type or "").split(";")[0].strip().lower()
     if ctype and ctype != CESR_CONTENT_TYPE:
         raise falcon.HTTPError(
@@ -94,6 +95,57 @@ class HealthEnd:
 
     def on_get(self, _req, rep):
         rep.media = dict(status="ok")
+        rep.status = falcon.HTTP_200
+
+
+class IntroductionsEnd:
+    """Verify public KEL history before accepting signed queries from its owner."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def on_post(self, req, rep):
+        try:
+            ims = _loadCesrStream(req)
+            parser = Parser(version=Vrsn_2_0)
+            events = []
+            while ims:
+                event = parser.parseOneBare(ims=ims, processive=False)
+                serder = event.serder
+                if (not isinstance(serder, SerderKERI)
+                        or serder.pvrsn.major != 2
+                        or serder.ilk not in ("icp", "rot", "ixn", "dip", "drt")
+                        or not event.sigers):
+                    raise ValidationError("introduction requires signed V2 key events")
+                events.append(event)
+
+            # Accept history only for allow-listed observers and the delegators
+            # their delegated events name, so strangers cannot fill the store.
+            allowed = set(self.ctx.observers or ())
+            while delegators := {event.serder.ked["di"] for event in events
+                                 if event.serder.pre in allowed and event.serder.ked.get("di")} - allowed:
+                allowed |= delegators
+            if any(event.serder.pre not in allowed for event in events):
+                raise falcon.HTTPForbidden(description="observer AID is not allow-listed")
+
+            # Parse the complete request before processing any event. Native
+            # Kevery checks signatures, event order, delegation, and receipts.
+            for event in events:
+                serder = event.serder
+                # Native first-seen history includes events later superseded by
+                # recovery. Replaying them must not replace current key state.
+                if self.ctx.hby.db.fons.get(keys=(serder.pre, serder.said)) is not None:
+                    continue
+                parser.msgProcess(asdict(event), kvy=self.ctx.kvy,
+                                  tvy=None, exc=None, rvy=None, vry=None)
+                if self.ctx.hby.db.kels.getLast(keys=serder.pre, on=serder.sn) != serder.said:
+                    raise ValidationError("introduced key event is not accepted")
+        except falcon.HTTPError:
+            raise
+        except Exception as ex:
+            raise falcon.HTTPBadRequest(description=str(ex)) from ex
+
+        rep.media = dict(prefixes=list(dict.fromkeys(event.serder.pre for event in events)))
         rep.status = falcon.HTTP_200
 
 
@@ -246,7 +298,7 @@ class BulkQueryEnd:
 
     def on_post(self, req, rep):
         try:
-            ims = _loadQueryStream(req)
+            ims = _loadCesrStream(req)
         except falcon.HTTPError:
             raise
         except Exception as ex:
