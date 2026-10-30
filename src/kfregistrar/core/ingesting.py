@@ -4,14 +4,47 @@ Controller ingest of pre-built, KEL-anchored TEL events for hosting.
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from keri import Vrsn_2_0, help
 from keri.acdc import regeventing
 from keri.core import Number, Parser, SerderACDC
+from keri.core.coring import Saider
+from keri.db.koming import Komer
 from keri.kering import MissingAnchorError, ValidationError
 
 
 logger = help.ogler.getLogger()
+
+
+@dataclass
+class _PendingSubmission:
+    saids: list[str]
+
+
+def _acceptTelChain(store, regk, chain):
+    """Persist a verified chain without replacing slots or regressing its head."""
+    sequenced = [(Number(numh=serder.sad["n"]).num, serder) for serder in chain]
+    for sn, serder in sequenced:
+        current = store.seqEvent(regk, sn)
+        if current is not None and current.said != serder.said:
+            return f"conflicting TEL event at registry {regk} sequence {sn}"
+
+    for sn, serder in sequenced:
+        if store.seqEvent(regk, sn) is not None:
+            continue
+
+        store.putEvent(serder)
+        store.baser.tels.put(keys=regk, on=sn, val=Saider(qb64=serder.said))
+
+    # Reconcile from accepted slots, including those beyond an older replay.
+    latest = max(
+        store.baser.tels.getAllItemIter(keys=regk),
+        key=lambda item: item[1], default=None,
+    )
+    if latest is not None:
+        store.baser.heads.pin(keys=regk, val=latest[2])
+    return None
 
 
 def parseTelStream(stream):
@@ -126,8 +159,61 @@ class ControllerIngester:
         self.hby = hby
         self.store = store
         self.kvy = kvy
-        # Pending batches awaiting issuer KEL anchors: regk -> (rip, updates)
-        self.pending = {}
+        self.submissions = Komer(
+            db=store.baser, subkey="kf_pending.", klas=_PendingSubmission
+        )
+        # Registry -> submission SAID -> ordered event references.
+        self.pending = self._restorePending()
+
+    def _restorePending(self):
+        """Restore complete submissions, never infer batches from legacy escrows.
+
+        The reserved ``legacy`` record holds unclassified event references;
+        it is never verified as a submission or removed automatically.
+        Reingestion establishes new membership without deleting legacy state.
+        """
+        pending = {}
+        held = defaultdict(set)
+        for (regk, sid), record in self.submissions.getTopItemIter():
+            held[regk].update(record.saids)
+            if sid != "legacy":
+                pending.setdefault(regk, {})[sid] = record
+
+        legacy = defaultdict(set)
+        for escrow in (self.store.baser.maes, self.store.baser.ooes):
+            for (regk,), _sn, (said,) in escrow.getTopItemIter():
+                if said not in held[regk]:
+                    legacy[regk].add(said)
+        for regk, saids in legacy.items():
+            key = (regk, "legacy")
+            record = self.submissions.get(keys=key)
+            saids.update(record.saids if record is not None else ())
+            self.submissions.pin(keys=key, val=_PendingSubmission(sorted(saids)))
+        for (regk, sid), _record in self.submissions.getTopItemIter():
+            if sid == "legacy":
+                logger.warning(
+                    "registry %s has legacy escrow without submission membership; "
+                    "recovery requires reingestion", regk,
+                )
+        return pending
+
+    def _clearSubmission(self, regk, sid, chain):
+        """Clear unshared escrows before removing this batch's durable membership."""
+        held = set()
+        for (_regk, other), record in self.submissions.getTopItemIter(
+            keys=(regk, "")
+        ):
+            if other != sid:
+                held.update(record.saids)
+        for serder in chain:
+            if serder.said not in held:
+                sn = Number(numh=serder.sad["n"]).num
+                self.store.clearEscrows(regk, sn, serder.said)
+        self.submissions.rem(keys=(regk, sid))
+        if regk in self.pending:
+            self.pending[regk].pop(sid, None)
+            if not self.pending[regk]:
+                del self.pending[regk]
 
     def ingest(self, kel, tel):
         """Ingest issuer KEL then verify and store TEL events.
@@ -172,10 +258,26 @@ class ControllerIngester:
             dict: same shape as ``ingest`` summary for registries that moved.
         """
         summary = dict(accepted={}, pending={}, rejected={})
-        for regk in list(self.pending):
-            rip, updates = self.pending[regk]
-            result = self._ingestRegistry(regk, rip, updates)
-            summary[result[0]][regk] = result[1]
+        for regk, submissions in list(self.pending.items()):
+            for _sid, record in list(submissions.items()):
+                events = [self.store.event(said) for said in record.saids]
+                missing = [said for said, event in zip(record.saids, events)
+                           if event is None]
+                if missing:
+                    msg = f"pending TEL submission for {regk} missing event bodies: {missing}"
+                    logger.error(msg)
+                    summary["rejected"][regk] = msg
+                    continue
+                if not events or events[0].said != regk:
+                    msg = f"invalid pending TEL submission membership for {regk}"
+                    logger.error(msg)
+                    summary["rejected"][regk] = msg
+                    continue
+                bucket, detail = self._ingestRegistry(regk, events[0], events[1:])
+                if bucket == "rejected":
+                    summary[bucket][regk] = detail
+                else:
+                    summary[bucket][regk] = summary[bucket].get(regk, 0) + detail
         return summary
 
     def _ingestRegistry(self, regk, rip, updates):
@@ -188,17 +290,24 @@ class ControllerIngester:
         if rip is None:
             msg = f"TEL stream missing rip for registry {regk}"
             logger.info(msg)
-            self.pending.pop(regk, None)
             return "rejected", msg
+
+        submitted = [rip] + list(updates)
+        saids = [serder.said for serder in submitted]
+        sid = Saider.saidify(sad=dict(d="", r=regk, e=saids))[0].qb64
 
         try:
             regeventing.vet(rip=rip, updates=updates, db=self.hby.db)
         except MissingAnchorError as ex:
-            self.pending[regk] = (rip, list(updates))
-            self.store.escrowMissingAnchor(regk, 0, rip.said)
-            for bup in updates:
-                sn = Number(numh=bup.sad["n"]).num
-                self.store.escrowMissingAnchor(regk, sn, bup.said)
+            # Bodies precede membership; membership precedes event escrow rows.
+            for serder in submitted:
+                self.store.putEvent(serder)
+            record = _PendingSubmission(saids)
+            self.submissions.pin(keys=(regk, sid), val=record)
+            self.pending.setdefault(regk, {})[sid] = record
+            for serder in submitted:
+                sn = Number(numh=serder.sad["n"]).num
+                self.store.escrowMissingAnchor(regk, sn, serder.said)
             logger.info(
                 "controller ingest escrow registry %s pending KEL anchor: %s",
                 regk,
@@ -206,15 +315,15 @@ class ControllerIngester:
             )
             return "pending", len(updates) + 1
         except ValidationError as ex:
-            self.pending.pop(regk, None)
+            self._clearSubmission(regk, sid, submitted)
             logger.info("controller ingest rejected registry %s: %s", regk, ex)
             return "rejected", str(ex)
 
-        chain = [rip] + sorted(
-            updates, key=lambda s: Number(numh=s.sad["n"]).num
-        )
-        for serder in chain:
-            sn = Number(numh=serder.sad["n"]).num
-            self.store.accept(regk, sn, serder)
-        self.pending.pop(regk, None)
+        chain = [rip] + sorted(updates, key=lambda s: Number(numh=s.sad["n"]).num)
+        conflict = _acceptTelChain(self.store, regk, chain)
+        if conflict is not None:
+            self._clearSubmission(regk, sid, submitted)
+            logger.info("controller ingest rejected registry %s: %s", regk, conflict)
+            return "rejected", conflict
+        self._clearSubmission(regk, sid, submitted)
         return "accepted", len(chain)
