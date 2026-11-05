@@ -11,7 +11,7 @@ from keri.app.configing import Configer
 from keri.app.httping import CESR_CONTENT_TYPE
 from keri.core import (
     Blinder, Codens, Counter, Kevery, Number, Saider, SealSource,
-    SerderACDC, messagize, query, rotate,
+    Parser, SerderACDC, messagize, query, rotate,
 )
 from keri.core.signing import Salter
 from keri.help import helping
@@ -33,9 +33,22 @@ def _postCesr(client, hab, serder, path="/"):
     return client.simulate_post(path, body=bytes(msg), headers=headers)
 
 
+def _splitBulk(raw):
+    ims = bytearray(raw)
+    while ims:
+        try:
+            serder = SerderACDC(raw=ims)
+            if serder.ilk in ("rip", "bup"):
+                break
+        except Exception:
+            pass
+        Parser(version=Vrsn_2_0).parseOne(ims=ims, processive=False)
+    return raw[:len(raw) - len(ims)], bytes(ims)
+
+
 def _telIlks(raw):
     """Read concatenated ACDC TEL bodies into ilk labels."""
-    ims = bytearray(raw)
+    ims = bytearray(_splitBulk(raw)[1])
     ilks = []
     while ims:
         serder = SerderACDC(raw=ims)
@@ -240,7 +253,7 @@ def test_whitelisted_observer_pulls_contiguous_tel():
             response = _postCesr(outer, observer, qry)
             assert response.status == falcon.HTTP_200
             assert response.headers["content-type"] == CESR_CONTENT_TYPE
-            assert response.content == ctx.rgy.store.cloneTel(regk)
+            assert _splitBulk(response.content)[1] == ctx.rgy.store.cloneTel(regk)
             assert _telIlks(response.content) == ["rip", "bup"]
 
             # Knowing the observer's public keys never authorizes an impostor.
@@ -288,6 +301,9 @@ def test_introduction_retry_preserves_accepted_recovery_history():
             hby.db.close(clear=False)
             hby.db.reopen(reuse=True)
             hby.db.kevers.clear()
+            assert _postCesr(client, observer, _bulkQuery(observer)).status == falcon.HTTP_200
+            attacker = remote.makeHab(name="restart-attacker")
+            assert _postCesr(client, attacker, _bulkQuery(observer)).status == falcon.HTTP_401
             observer.rotate(gvrsn=Vrsn_2_0)
             retried = client.simulate_post(
                 "/introductions", body=_kelClone(observer),
@@ -493,7 +509,7 @@ def test_controller_ingest_hosts_foreign_tel_for_observer_bulk():
             qry = _bulkQuery(observer, regk=regk, route="tels/bulk")
             response = _postCesr(outer, observer, qry)
             assert response.status == falcon.HTTP_200
-            assert response.content == telBytes
+            assert _splitBulk(response.content)[1] == telBytes
             assert _telIlks(response.content) == ["rip", "bup"]
         finally:
             ctx.rgy.close()
@@ -554,7 +570,7 @@ def test_controller_ingest_pending_until_kel_anchors():
                 qry2 = _bulkQuery(observer, regk=regk, route="tels/bulk")
                 response = _postCesr(outer, observer, qry2)
                 assert response.status == falcon.HTTP_200
-                assert response.content == telBytes
+                assert _splitBulk(response.content)[1] == telBytes
             finally:
                 ctx.rgy.close()
 
@@ -1083,5 +1099,93 @@ def test_external_api_has_no_ingest_route():
                 json=dict(kel="", tel=""),
             )
             assert response.status == falcon.HTTP_404
+        finally:
+            ctx.rgy.close()
+
+
+def test_bulk_replicates_complete_issuer_history_to_independent_verifier():
+    """A fresh verifier receives signatures and post-anchor rotations with TELs."""
+    with openHab(name="bulk-issuer", temp=True, version=Vrsn_2_0) as (_, issuer), \
+            openHby(name="bulk-registrar", temp=True, version=Vrsn_2_0) as hby, \
+            openHby(name="bulk-verifier", temp=True, version=Vrsn_2_0) as verifier:
+        observer = hby.makeHab(name="observer")
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            rip = regcept(israid=issuer.pre)
+            _anchor(issuer, rip)
+            issuer.rotate(gvrsn=Vrsn_2_0)
+            inner = testing.TestClient(ctx.internalApp)
+            response = inner.simulate_post("/ingest", json={
+                "kel": _kelClone(issuer), "tel": rip.raw.decode(),
+            })
+            assert rip.said in response.json["accepted"]
+            outer = testing.TestClient(ctx.externalApp)
+            response = _postCesr(outer, observer, _bulkQuery(observer))
+            assert response.status == falcon.HTTP_200
+            kel, tel = _splitBulk(response.content)
+            assert tel == rip.raw
+            assert issuer.pre not in verifier.kevers
+            kvy = Kevery(db=verifier.db, lax=True, local=False)
+            ingestKel(kvy, kel)
+            assert verifier.kevers[issuer.pre].serder.said == issuer.kever.serder.said
+            assert verifier.kevers[issuer.pre].sn == 2
+            assert regeventing.vet(rip=rip, db=verifier.db).said == rip.said
+            assert observer.pre not in verifier.kevers
+        finally:
+            ctx.rgy.close()
+
+
+@pytest.mark.parametrize("dependency", ["witness", "delegator"])
+def test_bulk_preserves_required_issuer_evidence(dependency):
+    """An independent verifier accepts the exported receipts and delegation."""
+    with openHab(name="evidence-source", temp=True, transferable=False,
+                 version=Vrsn_2_0) as (remote, witness), \
+            openHby(name="evidence-registrar", temp=True, version=Vrsn_2_0) as hby, \
+            openHby(name="evidence-verifier", temp=True, version=Vrsn_2_0) as verifier:
+        delegator = remote.makeHab(name="delegator")
+        options = (dict(wits=[witness.pre], toad=1) if dependency == "witness"
+                   else dict(delpre=delegator.pre))
+        issuer = remote.makeHab(name="issuer", **options)
+        inception = issuer.kever.serder
+        rip = regcept(israid=issuer.pre)
+        _anchor(issuer, rip)
+        anchor = issuer.kever.serder
+        kel = bytearray()
+        bonds = []
+        if dependency == "delegator":
+            delegator.interact(data=[dict(i=issuer.pre, s="0", d=inception.said)],
+                               gvrsn=Vrsn_2_0)
+            bonds = [SealSource(s=Number(num=delegator.kever.sn),
+                                d=Saider(qb64=delegator.kever.serder.said))]
+            kel.extend(_kelClone(delegator).encode())
+        for serder in (inception, anchor):
+            kel.extend(messagize(
+                serder, sigers=issuer.sign(ser=serder.raw, indexed=True),
+                wigers=(witness.sign(ser=serder.raw, indexed=True)
+                        if dependency == "witness" else None),
+                bonds=bonds if serder == inception else [], gvrsn=Vrsn_2_0,
+            ))
+        observer = hby.makeHab(name="observer")
+        ctx = makeContext(hby=hby, observers=[observer.pre])
+        try:
+            inner = testing.TestClient(ctx.internalApp)
+            ingested = inner.simulate_post("/ingest", json={
+                "kel": kel.decode(), "tel": rip.raw.decode(),
+            })
+            assert rip.said in ingested.json["accepted"]
+            response = _postCesr(testing.TestClient(ctx.externalApp), observer,
+                                _bulkQuery(observer))
+            assert response.status == falcon.HTTP_200
+            exported, tel = _splitBulk(response.content)
+            assert tel == rip.raw
+            kvy = Kevery(db=verifier.db, lax=True, local=False)
+            ingestKel(kvy, exported)
+            assert verifier.kevers[issuer.pre].serder.said == anchor.said
+            assert regeventing.vet(rip=rip, db=verifier.db).said == rip.said
+            if dependency == "delegator":
+                assert verifier.kevers[issuer.pre].delegated
+                assert delegator.pre in verifier.kevers
+            else:
+                assert verifier.kevers[issuer.pre].wits == [witness.pre]
         finally:
             ctx.rgy.close()

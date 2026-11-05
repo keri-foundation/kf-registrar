@@ -22,7 +22,10 @@ Modeled on [`witness-hk`](https://github.com/keri-foundation/witness-hk):
   query.
 - **External** (default `127.0.0.1:6632`): signed V2 `qry` POST (`r: "tels/bulk"`
   or `"regs"`) authenticated with KRAM and restricted to configured observer
-  AIDs. Response is concatenated CESR of accepted `rip`/`bup` events.
+  AIDs. Response is concatenated CESR: complete accepted issuer and delegator
+  KEL histories, including signatures and witness receipts, followed by accepted
+  `rip`/`bup` events. Histories include events after TEL anchors and first-seen
+  recovery events, so a receiving Observer can independently validate them.
 
 There is no registrar pool, no TEL receipts, and no wallet-shaped
 `GET /query?typ=tel`. Wallets and verifiers must not query this service for

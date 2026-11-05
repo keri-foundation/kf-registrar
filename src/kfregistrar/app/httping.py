@@ -49,9 +49,30 @@ def _registrySaids(qry, store, rgy):
     return list(raw)
 
 
-def cloneRegs(store, regks, sn=0):
-    """Concatenate accepted TEL CESR for one or more registry SAIDs."""
+def cloneRegs(hab, store, regks, sn=0):
+    """Clone complete accepted issuer histories before the selected TEL bodies.
+
+    Replay includes signatures, witness receipts and delegation evidence, and
+    retains first-seen recovery history. It is not truncated at a TEL anchor.
+    """
     stream = bytearray()
+    seen = set()
+
+    def appendHistory(pre):
+        if pre in seen:
+            return
+        seen.add(pre)
+        kever = hab.kevers[pre]
+        if kever.delegated:
+            appendHistory(kever.delpre)
+        for message in hab.db.clonePreIter(pre=pre, gvrsn=Vrsn_2_0):
+            stream.extend(message)
+
+    regks = list(regks)
+    for regk in regks:
+        rip = store.seqEvent(regk, 0)
+        if rip is not None:
+            appendHistory(rip.israid)
     for regk in regks:
         stream.extend(store.cloneTel(regk, sn=sn))
     return bytes(stream)
@@ -345,6 +366,12 @@ class BulkQueryEnd:
 
         kramer = self.ctx.kvy.kramer
         if kramer is not None:
+            # Restore already accepted sender state after a database reopen.
+            # KRAM's cache-only get() otherwise rejects a known observer.
+            try:
+                self.ctx.kvy.kevers[sender]
+            except KeyError:
+                pass  # Normal authentication rejects unknown sender state.
             kramer.reconcileConfig()
             try:
                 result = kramer.intake(serder, kwa)
@@ -366,6 +393,7 @@ class BulkQueryEnd:
             )
 
         data = cloneRegs(
+            self.ctx.hab,
             store,
             [regk for regk in regks if knownRegistry(store, self.ctx.rgy, regk)],
             sn=sn,
