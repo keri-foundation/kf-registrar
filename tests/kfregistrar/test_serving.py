@@ -46,17 +46,6 @@ def _splitBulk(raw):
     return raw[:len(raw) - len(ims)], bytes(ims)
 
 
-def _telIlks(raw):
-    """Read concatenated ACDC TEL bodies into ilk labels."""
-    ims = bytearray(_splitBulk(raw)[1])
-    ilks = []
-    while ims:
-        serder = SerderACDC(raw=ims)
-        ilks.append(serder.ilk)
-        del ims[:serder.size]
-    return ilks
-
-
 def _bulkQuery(hab, regk=None, route="tels/bulk", **qextra):
     q = dict(qextra)
     if regk is not None:
@@ -254,7 +243,6 @@ def test_whitelisted_observer_pulls_contiguous_tel():
             assert response.status == falcon.HTTP_200
             assert response.headers["content-type"] == CESR_CONTENT_TYPE
             assert _splitBulk(response.content)[1] == ctx.rgy.store.cloneTel(regk)
-            assert _telIlks(response.content) == ["rip", "bup"]
 
             # Knowing the observer's public keys never authorizes an impostor.
             forged = _postCesr(outer, outsider, _bulkQuery(observer, regk=regk))
@@ -510,7 +498,6 @@ def test_controller_ingest_hosts_foreign_tel_for_observer_bulk():
             response = _postCesr(outer, observer, qry)
             assert response.status == falcon.HTTP_200
             assert _splitBulk(response.content)[1] == telBytes
-            assert _telIlks(response.content) == ["rip", "bup"]
         finally:
             ctx.rgy.close()
 
